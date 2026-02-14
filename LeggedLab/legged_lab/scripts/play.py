@@ -15,12 +15,19 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument("--video", action="store_true", default=False, help="Record video in headless mode")
+parser.add_argument("--video_length", type=int, default=500, help="Number of steps to record")
+parser.add_argument("--video_fps", type=int, default=30, help="FPS for the recorded video")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+# enable cameras if recording video
+if args_cli.video:
+    args_cli.enable_cameras = True
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -144,6 +151,26 @@ def play():
         from legged_lab.utils.keyboard import Keyboard
         keyboard = Keyboard(env)  # noqa:F841
 
+    # set up video recording
+    if args_cli.video:
+        import numpy as np
+        import omni.replicator.core as rep
+
+        # create a camera at a good viewpoint
+        camera_path = "/World/play_camera"
+        camera = rep.create.camera(position=(3.0, 3.0, 2.5), look_at=(0.0, 0.0, 0.0))
+        rp = rep.create.render_product(camera, (1280, 720))
+        rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb", device="cpu")
+        rgb_annot.attach([rp])
+
+        # warm up rendering
+        for _ in range(5):
+            env.sim.render()
+
+        frames = []
+        print(f"[INFO] Recording video for {args_cli.video_length} steps...")
+
+    step_count = 0
     while simulation_app.is_running():
 
         with torch.inference_mode():
@@ -156,8 +183,30 @@ def play():
             critic_obs = infos["observations"]["critic"]
             obs = history_obs[:, -num_one_step_obs:]
 
+        # capture frames for video
+        if args_cli.video:
+            env.sim.render()
+            data = rgb_annot.get_data()
+            if data is not None and data.shape[0] > 0:
+                frames.append(np.array(data[:, :, :3]))
+
+            step_count += 1
+            if step_count >= args_cli.video_length:
+                # save video
+                video_dir = os.path.join(log_dir, "videos")
+                os.makedirs(video_dir, exist_ok=True)
+                video_path = os.path.join(video_dir, "play.mp4")
+
+                import imageio
+                writer = imageio.get_writer(video_path, fps=args_cli.video_fps)
+                for frame in frames:
+                    writer.append_data(frame)
+                writer.close()
+                print(f"[INFO] Video saved to: {video_path} ({len(frames)} frames)")
+                break
+
 
 if __name__ == '__main__':
-    EXPORT_POLICY = True
+    EXPORT_POLICY = False
     play()
     simulation_app.close()
